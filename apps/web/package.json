@@ -1,5 +1,5 @@
 {
-  "name": "web",
+  "name": "ai-doctor-web",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -23,6 +23,10 @@
     "@radix-ui/react-tooltip": "^1.2.13",
     "@supabase/supabase-js": "^2.110.8",
     "@tanstack/react-query": "^5.101.4",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",
@@ -36,18 +40,17 @@
     "recharts": "^3.10.0",
     "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4",
+    "typescript": "^5",
     "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
     "@playwright/test": "^1.61.1",
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "15.5.21",
-    "tailwindcss": "^4",
-    "typescript": "^5"
+    "eslint-config-next": "15.5.21"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

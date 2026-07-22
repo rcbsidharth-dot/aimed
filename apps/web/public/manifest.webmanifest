@@ -1,0 +1,16 @@
+{
+  "name": "AI Doctor in a Box",
+  "short_name": "AI Doctor",
+  "description": "Informational AI healthcare companion",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#05080f",
+  "theme_color": "#0891b2",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

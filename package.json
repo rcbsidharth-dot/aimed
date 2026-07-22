@@ -1,0 +1,21 @@
+{
+  "name": "ai-doctor-in-a-box",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI Doctor in a Box — production-grade AI health assistant",
+  "workspaces": [
+    "apps/web",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace=apps/web",
+    "dev:api": "cd apps/api && .venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
+    "build:web": "npm run build --workspace=apps/web",
+    "lint:web": "npm run lint --workspace=apps/web",
+    "test:api": "cd apps/api && .venv/bin/pytest -q",
+    "test:e2e": "npm run test:e2e --workspace=apps/web"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

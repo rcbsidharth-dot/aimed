@@ -24,6 +24,7 @@ jobs:
         env:
           MOCK_AI: "true"
           DATABASE_URL: sqlite+aiosqlite:///./test.db
+          PYTHONPATH: .
         run: .venv/bin/pytest -q
       - name: Docker build
         run: docker build -t aidoctor-api .

@@ -2,9 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const DISCLAIMER =
   "AI Doctor in a Box provides general information only and is not a substitute for professional medical advice, diagnosis, or treatment. Call local emergency services for emergencies.";
+
+const TEXT_MODEL = process.env.OPENROUTER_MODEL || "google/gemma-3-27b-it";
+const VISION_MODEL = process.env.OPENROUTER_VISION_MODEL || "qwen/qwen2.5-vl-32b-instruct";
 
 const EMERGENCIES: Record<string, object> = {
   "heart-attack": {
@@ -85,21 +89,43 @@ const EMERGENCIES: Record<string, object> = {
   },
 };
 
-async function openRouterChat(messages: { role: string; content: string }[], jsonMode = false) {
-  const key = process.env.OPENROUTER_API_KEY;
-  if (!key) {
+function hasOpenRouterKey() {
+  return Boolean(process.env.OPENROUTER_API_KEY?.trim());
+}
+
+function parseJsonLoose(text: string) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch {
+        return null;
+      }
+    }
     return null;
   }
+}
+
+async function openRouterChat(
+  messages: Array<{ role: string; content: unknown }>,
+  opts: { jsonMode?: boolean; model?: string } = {},
+) {
+  const key = process.env.OPENROUTER_API_KEY?.trim();
+  if (!key) return null;
+
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
-      "HTTP-Referer": "https://aidoctor.app",
+      "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL || "https://aidoctor.app",
       "X-Title": "AI Doctor in a Box",
     },
     body: JSON.stringify({
-      model: "google/gemma-3-27b-it",
+      model: opts.model || TEXT_MODEL,
       messages: [
         {
           role: "system",
@@ -109,12 +135,13 @@ async function openRouterChat(messages: { role: string; content: string }[], jso
         ...messages,
       ],
       temperature: 0.3,
-      ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
+      ...(opts.jsonMode ? { response_format: { type: "json_object" } } : {}),
     }),
   });
+
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`OpenRouter error: ${res.status} ${text}`);
+    throw new Error(`OpenRouter error: ${res.status} ${text.slice(0, 500)}`);
   }
   const data = await res.json();
   return data.choices?.[0]?.message?.content as string;
@@ -137,7 +164,36 @@ function mockSearch(query: string) {
     recovery_timeline: "Often improves in 24–72 hours",
     references: ["CDC general guidance"],
     disclaimer: DISCLAIMER,
+    ai_mode: "mock",
   };
+}
+
+function mockVision(bodyRegion: string) {
+  return {
+    id: crypto.randomUUID(),
+    possible_conditions: [
+      { name: "Contact dermatitis", confidence: 0.61 },
+      { name: "Mild inflammatory skin response", confidence: 0.28 },
+    ],
+    severity_score: 0.35,
+    confidence: 0.55,
+    urgency: "routine_to_urgent_if_spreading",
+    visual_explanation: `Informational mock analysis for ${bodyRegion}. Configure OPENROUTER_API_KEY for live vision AI.`,
+    bounding_boxes: [{ label: "affected_area", x: 0.2, y: 0.25, w: 0.4, h: 0.35 }],
+    recommendations: [
+      "Keep area clean and dry",
+      "Avoid known irritants",
+      "Seek care if fever, rapid spread, or pus develops",
+    ],
+    disclaimer: DISCLAIMER,
+    ai_mode: "mock",
+  };
+}
+
+async function fileToDataUrl(file: File) {
+  const buf = Buffer.from(await file.arrayBuffer());
+  const mime = file.type || "image/jpeg";
+  return `data:${mime};base64,${buf.toString("base64")}`;
 }
 
 export async function GET(
@@ -148,7 +204,14 @@ export async function GET(
   const joined = path.join("/");
 
   if (joined === "health") {
-    return NextResponse.json({ status: "ok", service: "ai-doctor-vercel", disclaimer: DISCLAIMER });
+    return NextResponse.json({
+      status: "ok",
+      service: "ai-doctor-vercel",
+      openrouter_configured: hasOpenRouterKey(),
+      text_model: TEXT_MODEL,
+      vision_model: VISION_MODEL,
+      disclaimer: DISCLAIMER,
+    });
   }
   if (joined === "emergency") {
     return NextResponse.json({
@@ -207,10 +270,15 @@ export async function GET(
     });
   }
   if (joined === "admin/overview") {
-    return NextResponse.json({ user_count: 1, users: [{ id: "demo", email: "demo@aidoctor.local", health_score: 78 }], audit_logs: [] });
+    return NextResponse.json({
+      user_count: 1,
+      users: [{ id: "demo", email: "demo@aidoctor.local", health_score: 78 }],
+      audit_logs: [],
+      openrouter_configured: hasOpenRouterKey(),
+    });
   }
 
-  return NextResponse.json({ detail: `GET /${joined} not implemented on Vercel edge API` }, { status: 404 });
+  return NextResponse.json({ detail: `GET /${joined} not implemented on Vercel API` }, { status: 404 });
 }
 
 export async function POST(
@@ -219,29 +287,135 @@ export async function POST(
 ) {
   const { path } = await ctx.params;
   const joined = path.join("/");
-  const body = await req.json().catch(() => ({}));
+  const contentType = req.headers.get("content-type") || "";
 
   try {
+    // Multipart uploads (image scan + reports)
+    if (contentType.includes("multipart/form-data")) {
+      const form = await req.formData();
+      const file = form.get("file");
+      if (!(file instanceof File)) {
+        return NextResponse.json({ detail: "file is required" }, { status: 400 });
+      }
+
+      if (joined === "images/analyze") {
+        const bodyRegion = req.nextUrl.searchParams.get("body_region") || "skin";
+        if (!hasOpenRouterKey()) {
+          return NextResponse.json(mockVision(bodyRegion));
+        }
+        const dataUrl = await fileToDataUrl(file);
+        const prompt =
+          "Analyze this medical photo. Return JSON with possible_conditions[{name,confidence}], severity_score (0-1), confidence (0-1), urgency, visual_explanation, bounding_boxes[{label,x,y,w,h} normalized 0-1], recommendations, disclaimer. " +
+          `Body region hint: ${bodyRegion}.`;
+        const raw = await openRouterChat(
+          [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url: dataUrl } },
+              ],
+            },
+          ],
+          { jsonMode: true, model: VISION_MODEL },
+        );
+        const parsed = raw ? parseJsonLoose(raw) : null;
+        if (!parsed) return NextResponse.json(mockVision(bodyRegion));
+        return NextResponse.json({
+          id: crypto.randomUUID(),
+          ...parsed,
+          disclaimer: parsed.disclaimer || DISCLAIMER,
+          ai_mode: "openrouter",
+        });
+      }
+
+      if (joined === "reports/analyze") {
+        const reportType = req.nextUrl.searchParams.get("report_type") || "lab";
+        let extracted = "";
+        const name = (file.name || "").toLowerCase();
+        if (name.endsWith(".txt") || (file.type || "").startsWith("text/")) {
+          extracted = await file.text();
+        } else if ((file.type || "").startsWith("image/") || name.match(/\.(png|jpe?g|webp)$/)) {
+          if (!hasOpenRouterKey()) {
+            extracted = "OCR placeholder: Hemoglobin 11.2 g/dL, WBC 7.2, Platelets 245";
+          } else {
+            const dataUrl = await fileToDataUrl(file);
+            extracted =
+              (await openRouterChat(
+                [
+                  {
+                    role: "user",
+                    content: [
+                      { type: "text", text: "Extract all readable lab/report text from this image. Return plain text only." },
+                      { type: "image_url", image_url: { url: dataUrl } },
+                    ],
+                  },
+                ],
+                { model: VISION_MODEL },
+              )) || "Unable to extract text from image.";
+          }
+        } else {
+          extracted = `Uploaded file ${file.name} (${file.type || "unknown"}). PDF text extraction is limited on Vercel; paste values if needed.`;
+        }
+
+        const raw = await openRouterChat(
+          [
+            {
+              role: "user",
+              content:
+                "Explain this medical report. Return JSON with abnormal_values, normal_highlights, lifestyle_suggestions, questions_for_doctor, disclaimer.\n" +
+                `Type=${reportType}\nTEXT:\n${extracted.slice(0, 12000)}`,
+            },
+          ],
+          { jsonMode: true },
+        );
+        const analysis = raw
+          ? parseJsonLoose(raw) || { raw, disclaimer: DISCLAIMER }
+          : {
+              abnormal_values: [
+                {
+                  name: "Hemoglobin",
+                  value: "11.2 g/dL",
+                  interpretation: "Possibly low — confirm with clinician",
+                },
+              ],
+              questions_for_doctor: ["Do I need iron studies?"],
+              disclaimer: DISCLAIMER,
+              ai_mode: "mock",
+            };
+
+        return NextResponse.json({
+          id: crypto.randomUUID(),
+          extracted_text: extracted.slice(0, 2000),
+          analysis: { ...analysis, disclaimer: analysis.disclaimer || DISCLAIMER, ai_mode: hasOpenRouterKey() ? "openrouter" : "mock" },
+        });
+      }
+
+      return NextResponse.json({ detail: `POST /${joined} multipart not implemented` }, { status: 404 });
+    }
+
+    const body = await req.json().catch(() => ({}));
+
     if (joined === "search") {
       const query = String(body.query || "");
       const prompt = `Analyze this symptom query and return JSON with possible_diseases (name,confidence,severity), overall_severity, red_flags, recommended_actions, medicine_suggestions, home_remedies, when_to_go_to_er, specialist, recovery_timeline, references, disclaimer. Query: ${query}`;
-      const raw = await openRouterChat([{ role: "user", content: prompt }], true);
+      const raw = await openRouterChat([{ role: "user", content: prompt }], { jsonMode: true });
       if (!raw) return NextResponse.json(mockSearch(query));
-      try {
-        const parsed = JSON.parse(raw);
-        return NextResponse.json({ ...parsed, query, disclaimer: parsed.disclaimer || DISCLAIMER });
-      } catch {
-        return NextResponse.json(mockSearch(query));
-      }
+      const parsed = parseJsonLoose(raw);
+      if (!parsed) return NextResponse.json(mockSearch(query));
+      return NextResponse.json({ ...parsed, query, disclaimer: parsed.disclaimer || DISCLAIMER, ai_mode: "openrouter" });
     }
 
     if (joined === "chat") {
       const message = String(body.message || "");
-      const raw = await openRouterChat([{ role: "user", content: message }], false);
+      const raw = await openRouterChat([{ role: "user", content: message }]);
       return NextResponse.json({
         conversation_id: body.conversation_id || crypto.randomUUID(),
-        reply: raw || `## Guidance\n\nI understand: *${message}*\n\nRest, hydrate, and seek care for red flags.\n\n**Disclaimer:** ${DISCLAIMER}`,
+        reply:
+          raw ||
+          `## Guidance\n\nI understand: *${message}*\n\nRest, hydrate, and seek care for red flags.\n\n**Disclaimer:** ${DISCLAIMER}`,
         disclaimer: DISCLAIMER,
+        ai_mode: raw ? "openrouter" : "mock",
       });
     }
 
@@ -259,19 +433,17 @@ export async function POST(
             content: `Check drug interactions. Return JSON with interactions, warnings, disclaimer. Medicines=${JSON.stringify(body.medicines)}`,
           },
         ],
-        true,
+        { jsonMode: true },
       );
       if (raw) {
-        try {
-          return NextResponse.json(JSON.parse(raw));
-        } catch {
-          /* fallthrough */
-        }
+        const parsed = parseJsonLoose(raw);
+        if (parsed) return NextResponse.json({ ...parsed, ai_mode: "openrouter" });
       }
       return NextResponse.json({
         interactions: [],
         warnings: ["Verify with a pharmacist or clinician"],
         disclaimer: DISCLAIMER,
+        ai_mode: "mock",
       });
     }
 
